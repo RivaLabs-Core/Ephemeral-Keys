@@ -38,7 +38,7 @@ The documents are layered. Start with the spec, then read the analyses for the p
 
 **[`2b-pq-only-analysis.md`](./2b-pq-only-analysis.md)** is the WOTS+C-mode-specific analysis. Covers post-quantum unforgeability, the consequences of accidental key reuse (with concrete forgery probabilities), failure scenarios that risk reuse, key derivation, recovery options (WOTS+C pool vs SPHINCS+ vs FORS), the EIP-1271 incompatibility, and hash function selection.
 
-**[`wots-param-security-analysis.md`](./wots-param-security-analysis.md)** is a parameter table for WOTS+C. Classical and quantum security across `w ∈ {4, 8, 16, 32, 64, 128, 256}` for the chosen `l`. The takeaway: all rows give roughly equivalent security, so parameter choice is a gas-vs-signature-size engineering decision rather than a security one.
+**[`wots-param-security-analysis.md`](./wots-param-security-analysis.md)** is a parameter table for WOTS+C. Classical and quantum security across `w ∈ {4, 8, 16, 32, 64, 128, 256}` for the chosen `l`. The takeaway: all rows give roughly equivalent security at NIST level 1, so parameter choice is a gas-vs-signature-size engineering decision rather than a security one.
 
 ### Key derivation
 
@@ -58,7 +58,7 @@ The documents are layered. Start with the spec, then read the analyses for the p
 
 ## Status
 
-Work in progress. The specification and analyses are actively maintained and changes should be expected as the design matures and feedback comes in. Treat the current documents as the best available reference, not as a frozen standard. Reference implementations live in separate repositories and are also under active development.
+Work in progress. The specification and analyses are actively maintained and changes should be expected as the design matures and feedback comes in. Treat the current documents as the best available reference, not as a frozen standard. Reference implementations live in separate repositories and are also under active development. 
  
 ## Roadmap
  
