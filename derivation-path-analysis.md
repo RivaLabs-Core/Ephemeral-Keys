@@ -41,17 +41,18 @@ where `install_entropy` is 32 bytes from the platform CSPRNG, stored in the devi
 Both seeds are fed into standard BIP-32 (`HMAC-SHA512("Bitcoin seed", S)`), then derived down with hardened indices at every level. Hardening every level is a deviation from standard BIP-44, which leaves `change` and `address_index` non-hardened to enable xpub-based watch-only wallets. Under BIP-32, one non-hardened child private key plus the parent xpub reveals every sibling. In this wallet every sibling is a signing key, so non-hardened derivation would turn a single-leaf compromise into a full-branch compromise. Watch-only export via xpub was already meaningless for WOTS+C, where the on-chain "public key" is a hash commitment that changes every transaction, so there is no cost.
 
 ## Stage 4: four leaf paths
-
+ 
 ```
-m / 44' / 60' / 0'   / 0' / i'    — WOTS+C ephemeral         [S_wal]
-m / 44' / 60' / 1'   / 0' / i'    — ECDSA ephemeral           [S_wal]
-m / 44' / 60' / 2'   / 0' / i'    — Permit signer             [S_wal]
-m / 44' / 60' / 100' / 0' / 0'    — SLH-DSA recovery          [S_rec]
+m / 44' / 60' / a' / 0'   / i'    — WOTS+C ephemeral          [S_wal]
+m / 44' / 60' / a' / 1'   / i'    — ECDSA ephemeral           [S_wal]
+m / 44' / 60' / a' / 2'   / i'    — Permit signer             [S_wal]
+m / 44' / 60' / a' / 100' / 0'    — SLH-DSA recovery          [S_rec]
+m / 44' / 60' / a' / 101' / i'    — Spare keys                [S_rec]
 ```
-
-BIP-44 with SLIP-44 coin type 60 (Ethereum) keeps the mnemonic importable into any standard-compliant tool. Each key kind lives under its own BIP-44 account, so no two streams share an ancestor below the account level and their rotation cadences are independent. The three wallet-bound paths draw from `S_wal`; the recovery path draws from `S_rec`.
-
-The 2³¹ hardened-index space per account is effectively unbounded: at 100 transactions per day, exhaustion takes around 58,000 years.
+ 
+BIP-44 with SLIP-44 coin type 60 (Ethereum) keeps the mnemonic importable into any standard-compliant tool. The `account'` level (`a'`) preserves the standard BIP-44 user experience of deriving multiple independent accounts from a single seed; the signing-mode selector that previously lived at the account level has been moved one level deeper, into the `change` field, so each account exposes the full set of signer streams. No two streams within an account share an ancestor below the change level, keeping their rotation cadences independent. The first three paths under each account draw from `S_wal`; the recovery and spare-key paths draw from `S_rec`. The SLH-DSA recovery branch holds a single static leaf at index `0'`: SLH-DSA is a stateful-free, multi-use signature scheme, so the same key can sign an arbitrary number of recovery operations without rotation, and a single leaf is sufficient. The slot at `change = 101'`, reserved immediately after the SLH-DSA recovery branch, holds the spare keys, which are themselves rotatable along the `i'` index.
+ 
+The 2³¹ hardened-index space per (account, mode) pair is effectively unbounded: at 100 transactions per day, exhaustion takes around 58,000 years.
 
 ## Stage 5: WOTS+C leaf expansion
 
