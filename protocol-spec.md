@@ -1,11 +1,17 @@
+# NiceTry: Quantum-Safe Smart Wallet Infrastructure
+
 ## Abstract
 
-NiceTry is a quantum-safe smart wallet infrastructure for Ethereum. The core design leverages ERC-4337 account abstraction to enforce single-use signing keys: each key pair is used exactly once and rotated post-execution, while the smart account address remains constant. This eliminates long-term public key exposure, the attack surface that Shor's algorithm exploits against ECDSA, without requiring any changes to Ethereum's protocol. A second mode replaces ECDSA with WOTS+C (Winternitz One-Time Signature Plus, Compressed), a hash-based one-time signature scheme whose security reduces to preimage resistance rather than discrete log hardness, closing the residual vulnerability present in the ECDSA design.
+NiceTry is a quantum-safe smart wallet infrastructure for Ethereum. The core design leverages ERC-4337 account abstraction to rotate the authorizing signing key after every transaction, while the smart account address remains constant. This eliminates long-term public key exposure, the attack surface that Shor's algorithm exploits against ECDSA, without requiring any changes to Ethereum's protocol.
+
+The primary signing mode is FORS+C, a standalone hash-based few-time signature scheme derived from the FORS sub-component of SLH-DSA / SPHINCS+ with target-sum grinding. Security reduces to preimage resistance of Keccak-256, the few-time property means accidental key reuse degrades gracefully rather than catastrophically, and signature verification is economically viable on-chain at roughly 52k gas. Earlier iterations of the protocol used ECDSA with rotation and WOTS+C with rotation; both are retained as past implementations.
 
 ## Motivation
 
-Ethereum accounts are secured by ECDSA over the secp256k1 curve. The private key never appears on-chain; only the public key or its hash is exposed when a transaction is signed. This design is secure against classical computers because computing a discrete logarithm over an elliptic curve group is believed to be computationally infeasible.  
-That assumption breaks under Shor's algorithm. A quantum computer with sufficient qubit fidelity and count can recover an ECDSA private key from a public key in polynomial time. Current expert estimates place a cryptographically relevant quantum computer, one capable of breaking 256-bit elliptic curve cryptography, at roughly 5 to 10 years away, with significant uncertainty in both directions. The threat is not immediate, but the preparation window is.  
+Ethereum accounts are secured by ECDSA over the secp256k1 curve. The private key never appears on-chain; only the public key or its hash is exposed when a transaction is signed. This design is secure against classical computers because computing a discrete logarithm over an elliptic curve group is believed to be computationally infeasible.
+
+That assumption breaks under Shor's algorithm. A quantum computer with sufficient qubit fidelity and count can recover an ECDSA private key from a public key in polynomial time. Current expert estimates place a cryptographically relevant quantum computer, one capable of breaking 256-bit elliptic curve cryptography, at roughly 3 to 5 years away, with significant uncertainty in both directions. The threat is not immediate, but the preparation window is.
+
 Upgrading Ethereum's signature infrastructure is a multi-year process requiring EVM opcode changes, new precompiles, wallet software updates, and ecosystem-wide coordination. Historical precedent from SHA-1 deprecation and early TLS migrations suggests that even after standardization, actual adoption takes years. NiceTry is an alternative available today: a wallet that achieves quantum safety without any dependency on Ethereum protocol changes, and without waiting for ecosystem convergence on a post-quantum standard.
 
 ### Threat Model Summary
@@ -14,13 +20,13 @@ We consider an adversary who can observe all on-chain and mempool data and can p
 
 ## Protocol Overview
 
-NiceTry is a smart contract wallet conforming to ERC-4337 (Account Abstraction). It exposes a single, stable address to the user and supports two independent signing modes, which can be used alternatively, each with different security properties and tradeoffs.
+NiceTry is a smart contract wallet conforming to ERC-4337 (Account Abstraction). It exposes a single, stable address to the user. The current primary signing mode is FORS+C; earlier ECDSA-rotation and WOTS+C-rotation modes are retained and documented under [Past Implementations](#past-implementations).
 
-**ECDSA mode** is the simpler of the two. The account holds a single authorized signer address. Each signing key is used exactly once: after every transaction, the signer rotates to a fresh ECDSA key pair, while the smart account address never changes. This eliminates the long-term public key exposure that Shor's algorithm exploits, using only standard secp256k1 infrastructure available today. The one residual vulnerability is the mempool window: between broadcast and inclusion, the signature, and therefore the public key, is briefly visible, making it possible for a sufficiently fast quantum adversary to use this window to recover the private key and front-run the transaction.
+**FORS+C mode.** The account stores a 20-byte commitment derived from `(pkSeed, pkRoot)`, where `pkRoot` is the compression of the FORS+C public key. Each signature uses a fresh keypair: signing produces both a signature over the current UserOp and a commitment to the next keypair, which the contract writes atomically inside `validateUserOp`. Security reduces to preimage resistance of Keccak-256. Observing a signature in the mempool reveals nothing actionable to a quantum adversary, and accidental key reuse degrades gracefully rather than catastrophically. The signature is NIST security level 1 at the design target of one signature per key.
 
-**WOTS+C mode** closes that window: rather than ECDSA, the account uses WOTS+C (Winternitz One-Time Signature Plus, Compressed), a hash-based one-time signature scheme whose security reduces to preimage resistance rather than discrete log hardness. A WOTS+C signature does not expose a public key that can be inverted, observing a signature in the mempool gives an adversary nothing actionable. Key rotation still occurs after every transaction, and the on-chain state remains a single hash commitment to the current key. The signature is NIST security level 1.
+FORS+C in NiceTry is standalone: there is no XMSS hypertree above. The public key is the FORS roots compression alone. This is the simplification that makes on-chain verification economically viable; a full SLH-DSA / SPHINCS+ verify would cost an order of magnitude more gas. A dedicated domain separation byte distinguishes standalone FORS+C from SLH-DSA family members that share the same FORS primitive.
 
-Both modes are implemented as an ERC-4337 smart account and, separately, as an ERC-7579 validator module installable on any compliant modular account.
+The mode is implemented as an ERC-4337 smart account and, separately, as an ERC-7579 validator module installable on any compliant modular account.
 
 ## Definitions and Notation
 
@@ -28,33 +34,53 @@ Both modes are implemented as an ERC-4337 smart account and, separately, as an E
 
 **`pk`** — Signing public key corresponding to `sk`.
 
-**`addr(pk)`** — Ethereum address derived from an ECDSA public key. The on-chain signer identifier in ECDSA mode.
+**`addr(pk)`** — Ethereum address derived from an ECDSA public key. The on-chain signer identifier in the ECDSA past implementation.
 
-**`H(pk)`** — Hash of a serialized public key. The on-chain signer identifier in WOTS+C mode.
+**`H(pk)`** — Hash of a serialized public key. The on-chain signer identifier in the WOTS+C past implementation.
 
-**`sk_i`, `pk_i`** — The signing key pair at index `i`. Derived deterministically from the user's seed.
+**`pkSeed`** — 16-byte public seed. Tweak input to every hash call in FORS+C key generation, signing, and verification.
 
-**`seed`** — The user's master secret. Stored only on the client device. All key pairs are derived from it.
+**`pkRoot`** — 16-byte compression of the FORS+C public key (Keccak hash of the `K-1` surviving FORS tree roots under the +C variant).
 
-**`n`** — WOTS+C security parameter. Byte-length of each hash output and chain element.
+**`addr(pkSeed, pkRoot)`** — 20-byte commitment `keccak(pkSeed ‖ pkRoot)[12:32]`. The on-chain signer identifier in FORS+C mode.
 
-**`w`** — Winternitz parameter. Controls the tradeoff between chain length and signature size.
+**`sk_i`, `pk_i`** — The signing material at index `i`. Derived deterministically from the user's seed.
 
-**`l`** — Number of hash chains in a WOTS+C key pair. A function of `n` and `w`.
+**`seed`** — The user's master secret. Stored only on the client device. All key material is derived from it.
 
-**`sig`** — A signature over the ERC-4337 UserOp hash. 65 bytes in ECDSA mode; `l·n + overhead` bytes in WOTS+C mode.
+**`K`** — Number of FORS trees per keypair. Under +C, only `K-1` are computed and transmitted.
 
-**`ephemeral key`** — Any key pair `(sk_i, pk_i)` valid for exactly one signing operation before rotation. Applies to both modes.
+**`A`** — FORS tree height. Each tree has `2^A` leaves.
+
+**`mdT`** — `A`-bit message-digest field selecting one leaf in tree `t`.
+
+**`counter`** — 16-byte grinding nonce iterated by the signer until the `K`-th `mdT` field is zero.
+
+**`n`** — Hash truncation length in bytes. Common to FORS+C and WOTS+C parameterizations.
+
+**`w`** — Winternitz parameter (WOTS+C only). Controls the tradeoff between chain length and signature size.
+
+**`l`** — Number of hash chains in a WOTS+C keypair. A function of `n` and `w`.
+
+**`sig`** — A signature over the ERC-4337 UserOp hash. Size depends on the mode.
+
+**`ephemeral key`** — Any keypair valid for at most one signing operation in the design target. Applies to all modes.
+
+### FORS+C Parameters
+
+FORS+C is parameterized by `n` (truncated hash length in bytes), `K` (number of trees), and `A` (tree height). A signature consists of `R`, `pkSeed`, `K-1` (secret-key, auth-path) pairs of `n + A·n` bytes, and the grinding counter. The **C** in FORS+C stands for **Compression**: the signer iterates the counter until the resulting message digest has its `K`-th `A`-bit field equal to zero, allowing the verifier to skip that entire tree and dropping one auth path from the signature.
+
+Current selection is `n = 16`, `K = 26`, `A = 5`. Concrete numbers for signature size, verifier gas, and signer hashing cost are given in [FORS+C Mode → Parameters](#parameters).
 
 ### WOTS+C Parameters
 
-WOTS+C is parameterized by `n` and `w`. The number of chains `l` is determined by `n` and `w`. The **C** in WOTS+C stands for **Compression**: the signer brute-forces a short counter appended to the message such that the resulting digest always produces a fixed, known checksum, allowing the checksum chains to be dropped from the signature entirely. The `+` is inherited from WOTS+, the tweaked-hash variant. Concrete values for `n`, `w`, `l`, and the resulting signature size are given in Section 7.
+WOTS+C is parameterized by `n` and `w`. The number of chains `l` is determined by `n` and `w`. The **C** is the same compression trick: the signer brute-forces a counter so the message digest produces a fixed, known checksum, allowing the checksum chains to be dropped from the signature. Past-implementation deployed configuration is `n = 16`, `w = 32`, `l = 26`, target sum 403, signature 468 bytes.
 
 ## Account Architecture
 
 ### Smart Account Contract Layout
 
-NiceTry is deployed as a non-upgradeable smart contract. The current signer identifier: either `addr(pk_i)` for ECDSA mode or `H(pk_i)` for WOTS+C mode. A single storage slot tracks the signer identity, advancing the key after each transaction is an atomic update to that slot.
+NiceTry is deployed as a non-upgradeable smart contract. A single storage slot tracks the current signer identifier: `addr(pkSeed_i, pkRoot_i)` for FORS+C mode, or the historical commitments `addr(pk_i)` and `H(pk_i)` for the ECDSA and WOTS+C past implementations respectively. Advancing the key after each transaction is an atomic update to that slot.
 
 ### ERC-7579 Module Compatibility
 
@@ -62,131 +88,133 @@ The validation logic is also packaged as a standalone ERC-7579 validator module.
 
 ### Validation Flow
 
-When `validateUserOp` is called by the EntryPoint:
+When `validateUserOp` is called by the EntryPoint in FORS+C mode:
 
-1. **ECDSA mode:** recover the signer address from the UserOp signature via `ecrecover` and compare against the stored `addr(pk_i)`.  
-2. **WOTS+C mode:** call the WOTS+C verifier to reconstruct `pk_i` from the signature and the UserOp hash; assert `H(pk_i)` matches the stored value.  
-3. If validation passes, return `SIG_VALIDATION_SUCCESS`.  
-4. Rotate the signer to the new one passed in the transaction. Rotation is done atomically during the validation to minimize risk of transactions being submitted and authorized without a rotation occurring.
+1. Call the FORS+C verifier as a pure `recover(sig, userOpHash)`. The verifier reconstructs `(pkSeed, pkRoot)` from the signature and returns `addr(pkSeed, pkRoot)`.
+2. Compare the returned address against the stored signer identifier. If equal, return `SIG_VALIDATION_SUCCESS`.
+3. Rotate atomically: overwrite the stored value with `addr(pkSeed', pkRoot')` for the next keypair, supplied by the user in the UserOp calldata. Rotation occurs during validation to minimize the risk of an authorized transaction being finalized without the key advancing.
+
+The past-implementation validation flows are documented under [Past Implementations](#past-implementations).
 
 ### Key Derivation
 
-In both modes, key pairs are derived deterministically from `seed` using a BIP32-like path indexed by `idx`. The user never needs to store individual private keys; the seed alone is sufficient to regenerate any key at any index. In ECDSA mode the derived material is used as a secp256k1 scalar; in WOTS+C mode it feeds the WOTS+C key generation function directly.
+In all modes, key material is derived deterministically from `seed` using a BIP-44 path indexed by `idx`. The user never needs to store individual keys; the seed alone is sufficient to regenerate any key at any index. For FORS+C, the leaf entropy is expanded into `pkSeed` and the per-leaf secret-key material via tagged Keccak domain separation. The full per-mode derivation specification lives in [`derivation-path-analysis.md`](./derivation-path-analysis.md).
 
-## ECDSA Mode
-
-### Validation
-
-The ECDSA mode contract stores `addr(pk_i)`. When `validateUserOp` is called:
-
-1. Recover the signer address from the UserOp signature via `ecrecover` and compare against the stored `addr(pk_i)`.  
-2. If validation passes, return `SIG_VALIDATION_SUCCESS`.  
-3. Atomically rotate: overwrite the stored signer with `addr(pk_{i+1})`. The next signer address must be provided by the user in the UserOp. Rotation happens during validation to ensure no authorized transaction can be finalized without advancing the key.
-
-### Security Properties and Residual Vulnerability
-
-Each key pair is used exactly once. An observer who sees a transaction in the mempool learns `pk_i`, but by the time the block is included, `pk_i` is already spent and the account has rotated to `pk_{i+1}`. A classical adversary gains nothing from observing spent keys.
-
-The residual vulnerability is the mempool window: between broadcast and inclusion, a sufficiently fast quantum adversary could recover `sk_i` from the observed `pk_i` and submit a competing transaction before inclusion. This window is short, on the order of one block time, but non-zero. Private mempool relays (e.g. Flashbots Protect) eliminates it entirely by keeping the UserOp off the public mempool until inclusion.
-
-### Key Rotation
-
-Key rotation is done inside the `validateUserOp`, this way no authorized transaction can be finalized without advancing the key, reducing the possibility of user error.  
-If one of the UserOps reverts, the rotation must go through independently. This is possible in ERC-4337, where single userOps can revert while the parent transaction is still successful.  
-If the transaction fails entirely, for instance due to a wrong nonce in the transaction or insufficient gas being provided, the user key is exposed to potential quantum attackers since no rotation can be done onchain. In this case the user should be prompted to resubmit a transaction as soon as possible, to rotate the exposed signer to a fresh one. Spamming transactions has no downside in the ECDSA approach.  
-The same approach goes for a transaction that is not being included and is not visible onchain after a reasonable amount of time. This could mean that a malicious node operator has read the user's `pk` and is using a quantum computer to recover the user's `sk`. In this case too the user should be advised to resubmit a transaction as soon as possible, to rotate the exposed signer to a fresh one.
-
-### When to Use
-
-ECDSA mode is appropriate for users operating under a classical threat model, or as a starting point for quantum resistance. It requires no changes to key management tooling beyond the rotation logic, and its gas profile is close to a standard ERC-4337 account.
-
-## WOTS+C Mode
+## FORS+C Mode
 
 ### Validation
 
-The WOTS+C mode contract stores `H(pk_i)`. When `validateUserOp` is called:
+The FORS+C verifier is exposed as a pure `recover(sig, userOpHash)` function. Internally it:
 
-1. Call the WOTS+C verifier to reconstruct `pk_i` from the signature and the UserOp hash; assert `H(pk_i)` matches the stored value.  
-2. If validation passes, return `SIG_VALIDATION_SUCCESS`.  
-3. Atomically rotate: overwrite the stored value with `H(pk_{i+1})`. The next public key hash must be provided by the user in the UserOp. Rotation happens during validation to ensure no authorized transaction can be finalized without advancing the key.
+1. Hashes the UserOp digest with `pkSeed`, `R`, the FORS+C domain byte, and the counter to produce `dVal`.
+2. Asserts the `K`-th `A`-bit field of `dVal` is zero (the +C grinding constraint). If not, returns `address(0)`.
+3. Opens `K-1` FORS trees, deriving leaf hashes from the `K-1` supplied secret-key fragments and climbing each auth path to obtain `K-1` roots.
+4. Compresses the roots into `pkRoot` via a single Keccak call over the concatenated roots and a fresh ADRS.
+5. Returns `addr(pkSeed, pkRoot)`.
+
+The account contract compares the returned address against the stored signer and rotates atomically on match, as in [Validation Flow](#validation-flow).
 
 ### Security Properties
 
-Observing a WOTS+C signature in the mempool gives an adversary nothing actionable. Unlike ECDSA, there is no public key that can be inverted, the signature itself does not leak material that allows key recovery under any known algorithm, classical or quantum. The residual vulnerability present in the ECDSA design is eliminated.
+Observing a FORS+C signature in the mempool reveals nothing actionable to a quantum adversary. There is no public key that can be inverted; the signature itself leaks no material that allows key recovery under any known algorithm, classical or quantum. The residual mempool vulnerability present in the ECDSA design is eliminated.
 
-Each key pair is still used exactly once, and in this case reuse would be catastrophic: signing two different messages with the same WOTS+C key leaks enough chain information for a classical adversary to forge signatures. The rotation-on-validation design ensures reuse cannot occur through normal contract operation.
+Unlike WOTS+C, FORS+C is a few-time scheme rather than one-time. Each FORS+C key has graceful degradation under reuse: at the current parameters (`K=26, A=5`) the classical forgery hardness as a function of the number of signatures `q` produced under one key is:
 
-### Backup Singers
+| q | Bits (classical) |
+|---|------------------|
+| 1 | 128              |
+| 2 | 104              |
+| 3 | 89               |
+| 4 | 78               |
+| 5 | 70               |
 
-The WOTS+C contract must support registering one or more backup signers alongside the primary WOTS+C key. A backup signer can authorize a key rotation (updating the stored `H(pk_{i+1})`) but cannot execute arbitrary calldata. This is a recovery mechanism, not an alternative execution path.
-
-Several backup signer types are supported:
-
-**Additional WOTS+C keys.** A secondary OTS key stored under a separate commitment. Provides the same quantum-safety guarantees as the primary signer. Multiple OTS keys can be committed this way to allow multiple recovery attempts.
-
-**Stateless post-quantum signatures.** A backup signer using a stateless PQ scheme such as SLH-DSA. Unlike WOTS+C, a stateless scheme has no key rotation requirement and no reuse risk, making it well suited as a last-resort recovery key. The tradeoff is larger signature size and higher verification gas cost, manageable for a rare recovery operation.
-
-**ECDSA backup.** A backup signer using a standard secp256k1 key. This is the lowest-friction option, using a fresh ECDSA key for recovery has the same vulnerabilities as the ECDSA signing mechanism, as well as the same mitigation being private mempools for this rare recovery operation.
-
-The choice of backup signer type is left to the user. Multiple backup signers of different types can be registered simultaneously.
+The design target is `q = 1` and the protocol enforces single-use through atomic rotation. The few-time property is a safety margin: in the failure modes that would expose a WOTS+C signer to immediate classical forgery (reverted transaction, dropped UserOp, replacement transaction), a FORS+C signer remains unforgeable.
 
 ### Key Rotation
 
-Key rotation is done inside the `validateUserOp`, this way no authorized transaction can be finalized without advancing the key, reducing the possibility of user error.  
-If one of the UserOps reverts, the rotation must go through independently. This is possible in ERC-4337, where single userOps can revert while the parent transaction is still successful.  
-If the transaction fails entirely, for instance due to a wrong nonce in the transaction or insufficient gas being provided, the user **must** use a backup signer to rotate the main signer, since using the main signer again would reuse the same OTS and allow classical attackers to forge signatures.  
-Same goes if the user has signed a transaction that never shows up onchain. This means that a node operator could have maliciously blocked the user's transaction and reusing the same OTS could make the user vulnerable. In this case too the user must use a recovery method to rotate the main signer.
+Key rotation is done inside `validateUserOp`. No authorized transaction can be finalized without advancing the key, reducing the risk of user error.
 
-To avoid potentially catastrophic reuses of OTS, wallets should burn used private keys. This way there is no possibility that the user accidentally signs two times as the same signer.
+If one of the UserOps in a bundle reverts, the rotation still occurs. This is consistent with ERC-4337, where individual UserOps can revert while the parent transaction succeeds.
 
-### Signature Size and Gas
+If a transaction fails entirely (wrong nonce, insufficient gas) and is never included on-chain, the user can safely resign with the same FORS+C key, since reuse is not immediately catastrophic. The wallet MUST track the per-key reuse count and enforce a bounded budget. Recommended policy:
 
-| w   | l  |   Security    | Target sum | Hash (verify) | Gas (verify) | Sig (blob) |
-|-----|----|---------------|------------|---------------|--------------|------------|
-| 4   | 64 | NIST Level 1  | 96         | 96            | ~31k         | 1076B      |
-| 8   | 44 | NIST Level 1  | 154        | 154           | ~43k         | 756B       |
-| 16  | 32 | NIST Level 1  | 240        | 240           | ~60k         | 564B       |
-| 32  | 26 | NIST Level 1  | 403        | 403           | ~93k         | 468B       |
-| 64  | 22 | NIST Level 1  | 693        | 693           | ~151k        | 404B       |
-| 128 | 20 | NIST Level 1  | 1270       | 1270          | ~266k        | 372B       |
-| 256 | 16 | NIST Level 1  | 2040       | 2040          | ~420k        | 308B       |
+- `q ≤ 2` is the normal-operation envelope, at NIST Level 1 security or above (≥ 104 bits classical). Replacement-transaction flows fall here.
+- `q ≤ 5` is the maximum permitted under degraded security (≥ 70 bits classical) for emergency reuse.
+- Beyond `q = 5`, the wallet MUST refuse to sign with that key.
 
-### Multi-Wallet compatibility
+Wallets SHOULD burn private key material after the per-key budget is reached, and SHOULD NOT expose signing primitives that allow exceeding the budget. The two-forest cache mechanism described in the reference implementation (current keypair plus a precomputed next keypair, both resident on the signer) bounds normal-operation worst-case reuse to `q ≤ 2`.
 
-A WOTS+C wallet rotates signing keys after each use. 
-If two wallets share the same seed and derivation path, they generate identical key sequences. 
-Any independent advancement of the epoch counter on either wallet risks reusing the same one-time key, which breaks the scheme entirely.
-We developed a way to deal with this involving separate signers assigned to each wallet, derived from completely different derivation paths. 
-More details can be found in [Annex B](https://github.com/conor-deegan/ephemeral-keys/blob/cd-sec-analysis-1/protocol-spec-annex-b.md).
+### Parameters
+
+Current selection: `n = 16`, `K = 26`, `A = 5`.
+
+| Metric                       | Value         |
+|------------------------------|---------------|
+| Signature size               | 2,448 bytes   |
+| Verifier gas                 | ~52,000       |
+| Signer hashes per signature  | ~2,400        |
+| Hash truncation              | 16 bytes      |
+| Domain separation byte       | `0xFD`        |
+
+The set is current as of the latest implementation revision and may evolve as the design and tooling mature. The signer-hash count is dominated by FORS tree construction (`K · 2^A` leaf PRF calls plus internal nodes) and the grinding-counter expectation (`~2^A` retries on average). At `K = 26, A = 5` this is feasible on hardware wallets: roughly 7 seconds wall-clock on a Ledger Secure Element with software Keccak.
+
+### Multi-Wallet Compatibility
+
+A FORS+C wallet rotates signing keys after each use. If two wallets share the same seed and derivation path, they generate identical key sequences, and independent advancement of the epoch counter on either wallet risks reusing the same few-time key beyond what the per-key budget can absorb. The mitigation is the same as for WOTS+C: each wallet derives keys under a wallet-specific salt that gives non-overlapping key streams while keeping the mnemonic as a complete backup. See [Annex B](https://github.com/conor-deegan/ephemeral-keys/blob/cd-sec-analysis-1/protocol-spec-annex-b.md) for the mechanism.
+
+The few-time property of FORS+C makes the failure mode less brittle than WOTS+C (a single accidental cross-wallet reuse is recoverable rather than immediately catastrophic), but seed-derived wallet separation is still required.
+
+## Past Implementations
+
+Both modes below were primary signing modes in earlier revisions of the protocol. They remain deployable through the same factory and are documented here for completeness and historical reference. New deployments should use FORS+C unless a specific reason exists to prefer one of these.
+
+### ECDSA
+
+The initial design used ECDSA over secp256k1 with rotation after every transaction. The account stored `addr(pk_i)`. Validation:
+
+1. Recover the signer address from the UserOp signature via `ecrecover`. Compare against the stored `addr(pk_i)`.
+2. If equal, return `SIG_VALIDATION_SUCCESS`.
+3. Rotate atomically: overwrite the stored value with `addr(pk_{i+1})`, supplied by the user in the UserOp.
+
+Security relied on the rotation race: each key was retired before a quantum adversary could recover it from the observed public key. The residual vulnerability was the mempool window between broadcast and inclusion, during which a sufficiently fast quantum adversary could in principle recover `sk_i` and front-run the user. The intended mitigation was private mempool relays. Key reuse under ECDSA is not catastrophic against a classical adversary; under reuse the protocol's quantum-safety guarantees simply collapse to ordinary ECDSA semantics.
+
+### WOTS+C
+
+The second iteration replaced ECDSA with WOTS+C, a hash-based one-time signature scheme. The account stored `H(pk_i)`. Validation:
+
+1. Call the WOTS+C verifier to reconstruct `pk_i` from the signature and the UserOp hash. Assert `H(pk_i)` matches the stored value.
+2. If equal, return `SIG_VALIDATION_SUCCESS`.
+3. Rotate atomically: overwrite the stored value with `H(pk_{i+1})`, supplied by the user in the UserOp.
+
+Security reduced to preimage resistance of Keccak-256; observing a WOTS+C signature gave no advantage to a quantum adversary, and the mempool window was eliminated. The cost was reuse fragility: signing two different messages with the same WOTS+C key leaks enough chain information to allow classical forgery, making accidental reuse immediately catastrophic. Softening this failure mode is the principal reason FORS+C was introduced as the primary mode. Deployed parameters: `n = 16`, `w = 32`, `l = 26`, target sum 403, signature 468 bytes, verifier gas ~93,000.
 
 ## ERC Compatibility
 
 ### ERC-4337 Conformance
 
-Both the ECDSA and WOTS+C contracts implement the `IAccount` interface defined by ERC-4337. A notable deviation from common implementations is that both contracts write state during `validateUserOp`: the signer commitment is rotated atomically at validation time rather than during execution. This is intentional and does not break ERC-4337 conformance, but has two consequences worth documenting:
+All NiceTry account contracts implement the `IAccount` interface defined by ERC-4337. A notable deviation from common implementations is that the contracts write state during `validateUserOp`: the signer commitment is rotated atomically at validation time rather than during execution. This is intentional and does not break ERC-4337 conformance, but has two consequences worth documenting:
 
-- **Revert behavior:** if the inner transaction reverts, the key rotation has already occurred. A failed transaction consumes a key just as a successful one does.  
+- **Revert behavior:** if the inner transaction reverts, the key rotation has already occurred. A failed transaction consumes a key just as a successful one does. Under FORS+C this is recoverable through bounded reuse (see [Key Rotation](#key-rotation)); under WOTS+C it is not.
 - **Bundler compatibility:** bundlers simulate `validateUserOp` before inclusion. Since state written during simulation is not visible to subsequent simulations in the same bundle, bundlers must not include more than one pending UserOp per sender in a bundle. This is already standard bundler behavior and is not a new constraint introduced by NiceTry.
 
-Both contracts access only their own storage during `validateUserOp`, satisfying ERC-7562 storage access rules.
+All contracts access only their own storage during `validateUserOp`, satisfying ERC-7562 storage access rules.
 
 #### Current adoption of private mempools
 
-On many L2s bundlers already use private mempools, so the trust assumption for the ECDSA mode is restricted to the mempool owner. On Ethereum L1 there's a project for a shared mempool, but it's not used by every bundler yet.
+On many L2s bundlers already use private mempools, so the trust assumption for the ECDSA past implementation is restricted to the mempool owner. On Ethereum L1 there is an effort toward a shared mempool, but it is not yet used by every bundler. This concern does not apply to FORS+C or WOTS+C, where mempool observation is not actionable.
 
 ### ERC-7579 Module Interface
 
-The validation logic for both modes is additionally packaged as an ERC-7579 `IValidator` module. Users with an existing compliant modular account can install either validator without deploying a new NiceTry account. Module state is keyed by account address as the outermost mapping key, satisfying ERC-7562 requirements for module storage access.
+The validation logic for all modes is additionally packaged as an ERC-7579 `IValidator` module. Users with an existing compliant modular account can install the NiceTry validator without deploying a new NiceTry account. Module state is keyed by account address as the outermost mapping key, satisfying ERC-7562 requirements for module storage access.
 
 ### EIP-1271 Limitations
 
-Neither ECDSA nor WOTS+C mode implements EIP-1271 directly. In the WOTS+C case this is a fundamental incompatibility: verifying a signature must rotate the key, making it a state-mutating operation that cannot be expressed as a view function. To overcome this it might be possible to use a statless backup signer (if available) for this scope too. In the ECDSA case it is a current limitation rather than a fundamental one. Applications requiring off-chain signature verification are not supported in either mode at this time. This topic is covered in detail in [Annex A](https://github.com/conor-deegan/ephemeral-keys/blob/cd-sec-analysis-1/protocol-spec-annex-a.md).
+None of the NiceTry signing modes implement EIP-1271 directly. For FORS+C and WOTS+C the incompatibility is fundamental: signature verification mutates state (the rotation), and EIP-1271 requires a view function. For the ECDSA past implementation it is a current limitation rather than a fundamental one. The proposed workaround is a dedicated permit signer with its own isolated key stream and rotation policy, detailed in [Annex A](https://github.com/conor-deegan/ephemeral-keys/blob/cd-sec-analysis-1/protocol-spec-annex-a.md).
 
 ### ERC-7702 Relevance
 
-ERC-7702 allows an EOA to delegate execution to a smart contract implementation. If adopted, it could allow users to use NiceTry's validation logic without deploying a new account or transferring assets to a new address. The NiceTry contract interfaces are compatible with ERC-7702 delegation in principle, but a key piece of the puzzle is missing: the original EOA signer can always sign a transaction to change the EOA implementation. For Nicetry and ERC-7702 to be fully compatible it is needed what is described in [EIP-7851](https://eips.ethereum.org/EIPS/eip-7851) (EOA deactivation).
+ERC-7702 allows an EOA to delegate execution to a smart contract implementation. If adopted, it could allow users to use NiceTry's validation logic without deploying a new account or transferring assets to a new address. The NiceTry contract interfaces are compatible with ERC-7702 delegation in principle, but a key piece is missing: the original EOA signer can always sign a transaction to change the EOA implementation. Full ERC-7702 compatibility additionally requires what is described in [EIP-7851](https://eips.ethereum.org/EIPS/eip-7851) (EOA deactivation).
 
-## Reference implementations
+## Reference Implementations
 
-Work in progress
-
+The reference Solidity implementation of the FORS+C smart account, the WOTS+C and ECDSA past-implementation contracts, and the corresponding ERC-7579 validator modules lives in the [NiceTry](https://github.com/RivaLabs-Core/NiceTry) repository.
