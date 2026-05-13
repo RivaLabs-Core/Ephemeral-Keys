@@ -1,4 +1,4 @@
-# Ephemeral Keys: A Quantum-Safe Smart Account Protocol
+# Ephemeral Keys: A Quantum-Safe Smart Wallet Protocol
 
 ## Abstract
 
