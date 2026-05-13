@@ -1,8 +1,8 @@
-# Ephemeral Keys with WOTS+C and Multi-Wallet Support - Design Notes
+# Ephemeral Keys with FORS+C and Multi-Wallet Support - Design Notes
 
 ## The problem
 
-A WOTS+C wallet rotates signing keys after each use. If two wallets share the same seed and derivation path, they generate identical key sequences. Any independent advancement of the epoch counter on either wallet risks reusing the same one-time key, which breaks the scheme entirely.
+A FORS+C wallet using ephemeral keys rotates signing keys after each use. If two wallets share the same seed and derivation path, they generate identical key sequences. Any independent advancement of the epoch counter on either wallet risks reusing the same one-time key, which breaks the scheme entirely without some kind of sinchronization between wallets.
 
 ## The solution
 
@@ -15,20 +15,20 @@ A user will have access to a set of signers, one for each wallet in his possessi
 From a single mnemonic, the design supports two derivation paths:
 
 - **Mnemonic-only path.** Derives the recovery key directly from the mnemonic to be used with a post-quantum signature scheme (e.g. SPHINCS+). Accessible from any wallet, fully recoverable from the mnemonic alone. The recovery key has full signing authority over the wallet, but existing PQ signature schemes make verification very expensive. This path is intended for recovery scenarios only, including a compromised wallet, lost wallet, or key exhaustion.
-- **Wallet-bound path.** Derives from mnemonic + wallet_salt. Produces a derivation path unique to this specific wallet, from which the WOTS+C ephemeral signers are generated. These are the keys used for day-to-day transaction signing. Signatures are orders of magnitude cheaper to verify. This path is not recoverable from the mnemonic alone: the salt must also be available.
+- **Wallet-bound path.** Derives from mnemonic + wallet_salt. Produces a derivation path unique to this specific wallet, from which the FORS+C ephemeral signers are generated. These are the keys used for day-to-day transaction signing. Signatures are orders of magnitude cheaper to verify. This path is not recoverable from the mnemonic alone: the salt must also be available.
 
 ## Components
 
 - **Standard mnemonic.** Generated using a generic format (BIP-39 or equivalent). The root secret from which everything else derives.
 - **Recovery key.** Derived from the mnemonic only. Post-quantum scheme (e.g. SPHINCS+). Full signing authority, but high verification cost makes it impractical for regular use.
-- **Salt.** A value unique to each wallet that shares the same mnemonic. Must be persisted alongside the wallet (implementation is flexible, e.g. hash of a timestamp, as long as uniqueness is guaranteed). Loss of the salt means the WOTS+C signer tree cannot be re-derived, requiring recovery via the mnemonic-only path.
-- **WOTS+C signers.** Ephemeral, single-use signers derived from the mnemonic plus the salt. The gas-efficient path for standard transaction signing. The smart contract accepts both WOTS+C and SPHINCS+ signatures, but economic incentive keeps users here.
+- **Salt.** A value unique to each wallet that shares the same mnemonic. Must be persisted alongside the wallet (implementation is flexible, e.g. hash of a timestamp, as long as uniqueness is guaranteed). Loss of the salt means the FORS+C signer tree cannot be re-derived, requiring recovery via the mnemonic-only path.
+- **FORS+C signers.** Ephemeral, few-use signers derived from the mnemonic plus the salt. The gas-efficient path for standard transaction signing. The smart contract accepts both FORS+C and SPHINCS+ signatures, but economic incentive keeps users here.
 
 From a UX perspective, the system explicitly selects which mode to enter (standard or recovery). The interaction pattern is similar to the passphrase-based hidden wallet on Ledger and Trezor, though the underlying model is different: both paths here operate on the same account, with the contract enforcing distinct key types rather than separate account sets.
 
 ## Onchain contract side
 
-The contract doesn't need to know anything about the derivation scheme. Each wallet maps to a signer mapping element holding a commitment of the wallet's current signer's private key. When onboarding a new wallet, an existing authorized signer calls addSigner with the new wallet's first WOTS+C public key hash. This can be done either with an already authorized wallet or, for a simpler UX, with the signer associated with the stateless PQ recovery (derived from the mnemonic-only path) on the new wallet.
+The contract doesn't need to know anything about the derivation scheme. Each wallet maps to a signer mapping element holding a commitment of the wallet's current signer's private key. When onboarding a new wallet, an existing authorized signer calls addSigner with the new wallet's first FORS+C public key hash. This can be done either with an already authorized wallet or, for a simpler UX, with the signer associated with the stateless PQ recovery (derived from the mnemonic-only path) on the new wallet.
 
 Once added, each wallet advances its own local index counter independently, and no index is stored onchain.
 
@@ -48,7 +48,7 @@ BIP39 defines an optional passphrase that can be mixed into seed derivation alon
 
 In this use case, rather than a user-typed passphrase, each wallet computes its own deterministically from a unique identifier.
 
-This wallet-specific passphrase is fed into BIP39's PBKDF2 in place of a normal, user chosen, passphrase. Even with the same mnemonic on two separate wallets, with a different wallet-specific passphrase the derivation path is completely different, with no overlap in WOTS+C key streams and no cross-wallet coordination needed.
+This wallet-specific passphrase is fed into BIP39's PBKDF2 in place of a normal, user chosen, passphrase. Even with the same mnemonic on two separate wallets, with a different wallet-specific passphrase the derivation path is completely different, with no overlap in FORS+C key streams and no cross-wallet coordination needed.
 
 The wallet-specific passphrase does not need to be secret, since security still rests entirely on the mnemonic, the only requirement is that it be unique to the wallet. Mnemonic + wallet-specific passphrase identifier fully determines the key stream.
 
